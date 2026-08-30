@@ -1,0 +1,8 @@
+# runtime — no torch needed
+faster-whisper
+ctranslate2
+transformers
+sentencepiece
+soundcard      # WASAPI loopback: captures whatever plays on the PC
+numpy
+huggingface_hub
