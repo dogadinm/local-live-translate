@@ -1,91 +1,114 @@
-# Live Translate
+# Local Live Translate
 
-Субтитры в реальном времени для любого звука, который играет на компьютере —
-видео в браузере, плеер, Discord, игра. Распознаёт речь, переводит и показывает
-полосу субтитров поверх всех окон. Целевой язык переключается на лету.
+Live subtitles for anything playing on your PC — a video in the browser, a
+player, Discord, a game. It recognises the speech, translates it, and shows the
+result in a strip on top of every window. The target language switches on the
+fly. Everything runs locally: no cloud, no API keys.
 
 ```
-всё, что играет на ПК
-        │  WASAPI loopback (без драйверов)
+everything playing on the PC
+        │  WASAPI loopback (no driver needed)
         ▼
-   сегментация речи           ← отдаёт фразу каждые ~0.8 с, пока она говорится
+  speech segmentation      ← hands out the phrase every ~0.8 s while it is spoken
         ▼
-   faster-whisper turbo       ← распознаёт, язык определяет на каждой фразе
+  faster-whisper turbo     ← recognises it, detects the language per phrase
         ▼
-   NLLB-200                   ← переводит на выбранный язык
+  NLLB-200                 ← translates into the chosen language
         ▼
-   строка субтитров           ← поверх экрана, переписывается по ходу речи
+  subtitle strip           ← on top of everything, rewritten as speech goes on
 ```
 
-## Требования
+## Requirements
 
 - Windows, Python 3.10+
-- NVIDIA GPU — не обязателен, но без него будет заметно медленнее
+- An NVIDIA GPU is not required but the streaming mode needs one to keep up
 
-## Установка
+## Install
 
 ```
 pip install -r requirements.txt
-python convert_model.py     # один раз: скачивает NLLB-200 и жмёт в int8 (~660 МБ)
+python convert_model.py     # once: downloads NLLB-200 and squeezes it to int8 (~660 MB)
 ```
 
-`convert_model.py` требует `torch` — только на время конвертации. После неё его
-можно удалить, в рантайме он не нужен: и Whisper, и NLLB работают через
-CTranslate2 (C++).
+`convert_model.py` needs `torch`, but only while converting. Afterwards you can
+remove it — nothing at runtime uses it. Both models are run by CTranslate2, a
+C++ engine, with no Python framework on top.
 
-## Запуск
+## Run
 
 ```
-python main.py                  # перевод на русский, язык источника определится сам
-python main.py --tgt en         # на английский
-python main.py --src cs         # зафиксировать язык источника
-python main.py --list-devices   # какие есть устройства вывода
+python main.py                  # translate into Russian, source detected automatically
+python main.py --tgt en         # into English
+python main.py --src cs         # pin the source language
+python main.py --list-devices   # show output devices
 ```
 
-Модели Whisper скачиваются при первом запуске (~1.6 ГБ для turbo).
+Whisper models are downloaded on first run (~1.6 GB for turbo).
 
-| Ключ | Что делает |
+| Flag | What it does |
 |---|---|
-| `--tgt` | Целевой язык, по умолчанию `ru`. Меняется и прямо в окне |
-| `--src` | Язык источника. По умолчанию «Авто» — определяется заново на каждой фразе |
-| `--whisper` | Модель Whisper, по умолчанию `large-v3-turbo`. Слабее и быстрее: `small`, `medium` |
-| `--out-device` | Слушать конкретное устройство вывода вместо текущего |
+| `--tgt` | Target language, `ru` by default. Also switchable in the window |
+| `--src` | Source language. Defaults to `Auto` — detected again on every phrase |
+| `--whisper` | Whisper model, `large-v3-turbo` by default. Smaller and faster: `small`, `medium` |
+| `--out-device` | Listen to a specific output device instead of the current one |
 
-В окне два списка: **Слышать** — язык источника (`Авто` или конкретный, тогда он
-главнее автоопределения) и **Перевод на** — целевой язык. Оба меняются на лету.
-Полоса перетаскивается мышью, `Esc` или `✕` — выход.
+The window has two dropdowns: **Source** — the spoken language (`Auto`, or a
+specific one, which then overrides detection) — and **Translate to**. Both take
+effect immediately. Drag the strip with the mouse, quit with `Esc` or `✕`.
 
-## Тесты
+## Tests
 
 ```
 python test_segmenter.py
 ```
 
-Запускаются без зависимостей. Если поставишь pytest, `pytest test_segmenter.py`
-тоже работает — тесты написаны совместимо.
+No dependencies needed. If you install pytest, `pytest test_segmenter.py` works
+too — the tests are written to suit both.
 
-Покрыты два куска чистой логики — нарезка речи и отбрасывание устаревших
-черновиков. Всё остальное требует видеокарты, звуковой карты или экрана, а эти
-два работают на синтетическом сигнале и ловят как раз те ошибки, которые не
-видно глазом.
+They cover the two pieces of pure logic in the pipeline: cutting speech into
+phrases, and discarding drafts a newer draft has superseded. Everything else
+needs a GPU, a sound card or a screen; these two run on a synthetic signal and
+catch exactly the bugs that are invisible by eye.
 
-## Как захватывается звук
+## How the audio is captured
 
-WASAPI loopback — цифровой отвод микса, который Windows отправляет на устройство
-вывода. Это тот же сигнал, что идёт в наушники, снятый до них; микрофон не
-участвует. Захват идёт с текущего устройства по умолчанию и сам переезжает, если
-переключить наушники на колонки.
+WASAPI loopback taps the mix Windows sends to the output device. It is the same
+signal that reaches your headphones, taken just before them — no microphone is
+involved and nothing is lost. Capture follows whatever output device is current,
+and moves by itself if you switch from headphones to speakers.
 
-Громкость системы и наушников на захват не влияет, а вот приглушение **самого
-приложения** в микшере громкости Windows — влияет: до точки отвода звук уже тихий.
+System and headphone volume do not affect the capture. Muting **an individual
+app** in the Windows volume mixer does: by the tap point that audio is already
+silent.
 
-## Ограничения
+## Two things worth knowing
 
-- Только Windows. На macOS у CTranslate2 нет Metal, а loopback требует BlackHole
-- Слушает весь звук системы сразу, а не выбранное приложение. Per-app захват
-  (`PROCESS_LOOPBACK`, как в OBS) в Python-библиотеках не обёрнут — это следующий шаг
-- Черновики переводятся кусками фразы, поэтому строка переписывается на ходу и
-  промежуточный текст бывает неточным — смысл собирается к концу фразы. Это
-  осознанный размен: показывать сразу вместо того, чтобы ждать паузу
-- GPU занят почти постоянно: распознавание и перевод идут ~раз в секунду, а не
-  рывками на каждую фразу
+**Drafts get rewritten.** While a phrase is still being spoken it is handed to
+Whisper every 0.8 s, so the line updates as you listen rather than waiting for a
+pause. Drafts are shown dimmed and the final version replaces them in white.
+Mid-phrase they can be wrong — the meaning only settles at the end. That is a
+deliberate trade for showing text immediately.
+
+**An English target can skip a model.** Whisper translates into English on its
+own, so with `--tgt en` the NLLB stage is dropped entirely — one model less and
+about half a second of latency saved.
+
+This only works on models trained for the translation task, and the default
+`large-v3-turbo` is not one of them: turbo is a pruned large-v3 retrained on
+transcription alone, and the distil models are English-only. Asked to translate,
+they do not fail — they silently transcribe, which looks like working code
+returning untranslated text. So the shortcut is taken only for a model that
+supports it (`small`, `medium`, `large-v3`), and everything else goes through
+NLLB as usual. The startup log says which route is in use.
+
+## Limits
+
+- **Windows only.** Capture rests on WASAPI loopback. macOS has no system audio
+  tap at all; it needs BlackHole or ScreenCaptureKit.
+- **NVIDIA only for the streaming mode.** CTranslate2 supports CUDA and CPU but
+  not Metal, so on Apple Silicon both models fall back to the CPU and cannot
+  keep up with the 0.8 s cycle.
+- **All system audio at once**, not a chosen application. Windows 11 can capture
+  per process, but no Python library wraps that API — it needs hand-written COM.
+- **The GPU works almost continuously**: recognition and translation run about
+  once a second rather than once per phrase.
