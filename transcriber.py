@@ -2,16 +2,7 @@ from typing import Callable
 
 import numpy as np
 
-
-def _device() -> tuple[str, str]:
-    import ctranslate2  # already a faster-whisper dependency; avoids importing torch
-
-    try:
-        if ctranslate2.get_cuda_device_count() > 0:
-            return "cuda", "float16"
-    except Exception:
-        pass
-    return "cpu", "int8"
+from device import best_device
 
 
 class Transcriber:
@@ -37,7 +28,7 @@ class Transcriber:
     ):
         from faster_whisper import WhisperModel
 
-        device, compute_type = _device()
+        device, compute_type = best_device()
         print(f"[whisper] loading {model_size} on {device} ({compute_type})")
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
         self.pinned = language  # None = detect every segment

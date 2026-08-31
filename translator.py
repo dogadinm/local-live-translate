@@ -4,18 +4,10 @@ from pathlib import Path
 import ctranslate2
 from transformers import NllbTokenizer  # tokenizer only — no torch needed
 
+from device import best_device
 from langs import display, flores
 
 CACHE_DIR = Path.home() / ".cache" / "live_translate" / "nllb-ct2"
-
-
-def _device() -> str:
-    try:
-        if ctranslate2.get_cuda_device_count() > 0:
-            return "cuda"
-    except Exception:
-        pass
-    return "cpu"
 
 
 class Translator:
@@ -31,7 +23,7 @@ class Translator:
             raise RuntimeError(
                 f"Model not found: {model_dir}\nRun first:  python convert_model.py"
             )
-        device = _device()
+        device, _ = best_device()  # weights are already int8, so compute_type is moot
         print(f"[nllb] loading on {device}")
         self.translator = ctranslate2.Translator(
             str(model_dir),
