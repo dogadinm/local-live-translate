@@ -39,10 +39,16 @@ def build(args):
         language=args.src,
         on_language=overlay.set_detected_language,
     )
+    def change_target(iso: str):
+        translator.set_target(iso)
+        transcriber.set_target_language(iso)  # may switch Whisper to direct translation
+
+    transcriber.set_target_language(args.tgt)
+
     # wired after construction: the pickers drive the two models, and the models
     # cannot be passed to the window that is built before them
     overlay.on_source_change = transcriber.set_source
-    overlay.on_target_change = translator.set_target
+    overlay.on_target_change = change_target
 
     return SystemAudio(device_name=args.out_device), transcriber, translator, overlay
 

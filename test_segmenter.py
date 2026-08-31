@@ -1,7 +1,8 @@
-"""Tests for the two pieces of pure logic in the pipeline.
+"""Tests for the pipeline logic that runs without a GPU, sound card or screen.
 
-Everything else needs a GPU, a sound card or a screen; these two do not, and
-they are where the subtle bugs live. Run with pytest, or directly:
+Cutting speech into phrases, discarding superseded drafts, and deciding which
+Whisper models may take the English shortcut — the three places where a bug
+produces plausible-looking output instead of an error. Run with pytest, or:
 
     python test_segmenter.py
 """
@@ -131,6 +132,29 @@ def test_drain_starts_a_new_draft_run_after_a_final():
 
 def test_drain_on_an_empty_queue_returns_just_the_first_item():
     assert drain(queue.Queue(), ("only", True)) == [("only", True)]
+
+
+# --- which models may take the English shortcut ---------------------------
+
+
+def test_turbo_and_distil_models_cannot_translate():
+    from transcriber import _can_translate
+
+    # asking these to translate returns untranslated text instead of an error,
+    # so the check has to be right or the bug is invisible
+    assert not _can_translate("large-v3-turbo")
+    assert not _can_translate("turbo")
+    assert not _can_translate("distil-large-v3")
+    assert not _can_translate("small.en")
+
+
+def test_multilingual_models_can_translate():
+    from transcriber import _can_translate
+
+    assert _can_translate("large-v3")
+    assert _can_translate("large-v2")
+    assert _can_translate("medium")
+    assert _can_translate("small")
 
 
 if __name__ == "__main__":
