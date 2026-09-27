@@ -1,10 +1,12 @@
 import queue
+import time
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable
 
 from langs import display, picker_items
 from events import ApplicationStatus, ProcessingFinished, Transcript, Translation
+from scheduling import presentation_is_newer
 
 BG = "#000000"
 FG_SRC = "#9aa0a6"
@@ -17,6 +19,9 @@ AUTO = "Auto"
 class SubtitleOverlay:
     """Borderless always-on-top subtitle bar with source and target pickers."""
     metrics = None
+    max_display_lag = None
+    _last_translation = None
+    _last_transcript = None
 
     def __init__(
         self,
@@ -160,17 +165,30 @@ class SubtitleOverlay:
                         self.metrics.finish()
                         print(f"[metrics] saved to {self.metrics.directory / 'summary.json'}")
                 elif event is None:
+                    self._last_translation = None
+                    self._last_transcript = None
                     self.text_label.config(text="")
                     self.status.config(text="")
                 elif isinstance(event, ApplicationStatus):
                     self.application_status.config(text=event.message, fg="#ff6b6b" if event.is_error else FG_DIM)
                 elif isinstance(event, Translation):
+                    if not presentation_is_newer(event.meta, self._last_translation):
+                        if self.metrics:
+                            self.metrics.count("display_obsolete_revision")
+                        continue
+                    if self.max_display_lag is not None and time.monotonic() - event.meta.ended_at > self.max_display_lag:
+                        if self.metrics:
+                            self.metrics.discard("display", event, "expired")
+                        continue
+                    self._last_translation = event.meta
                     self.text_label.config(
                         text=event.text, fg=FG_DST if event.meta.is_final else FG_SRC
                     )
                     if self.metrics:
                         self.metrics.displayed(event)
-                elif event.detected_language and self.source_picker.get() == AUTO:
+                elif (event.detected_language and self.source_picker.get() == AUTO
+                      and presentation_is_newer(event.meta, self._last_transcript)):
+                    self._last_transcript = event.meta
                     self.status.config(text=f"detected: {display(event.detected_language)}")
         except queue.Empty:
             pass

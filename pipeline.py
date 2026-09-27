@@ -6,6 +6,7 @@ run independently so a slow translation never blocks the next recognition.
 import queue
 import threading
 from contextlib import nullcontext
+from collections import OrderedDict
 from dataclasses import replace
 from typing import Callable, TypeVar
 
@@ -13,6 +14,7 @@ from audio import SpeechSegmenter
 from config import ProcessingSettings
 from engines import Recognizer, TextTranslator
 from events import AudioChunk, AudioStreamEnded, PhraseMeta, SpeechSegment, Transcript, Translation
+from scheduling import PendingQueue, phrase_key, supersedes
 
 Event = TypeVar("Event", bound=SpeechSegment | Transcript | AudioStreamEnded)
 
@@ -69,10 +71,12 @@ def worker_segment(in_queue: queue.Queue[AudioChunk | AudioStreamEnded],
 def drain(work_queue: queue.Queue[Event], first: Event, metrics=None, stage="") -> list[Event]:
     """Take everything queued, dropping drafts that a newer draft supersedes.
 
-    Consecutive drafts with the same stream, phrase and settings version can
-    be replaced by a strictly newer revision. Finals are never dropped.
-    This reduces redundant work but does not impose a queue size limit.
+    PendingQueue already coalesces at insertion; do not pull its backlog into
+    a private batch where a new final could no longer replace waiting drafts.
+    Plain queues retain this helper for compatibility and isolated tests.
     """
+    if isinstance(work_queue, PendingQueue):
+        return [first]
     items = [first]
     while True:
         try:
@@ -81,25 +85,24 @@ def drain(work_queue: queue.Queue[Event], first: Event, metrics=None, stage="") 
             break
 
     kept = []
+    positions = {}
     for item in items:
         if isinstance(item, AudioStreamEnded):
             kept.append(item)
+            positions.clear()
             continue
-        previous = kept[-1].meta if kept and not isinstance(kept[-1], AudioStreamEnded) else None
-        current = item.meta
-        if (
-            previous is not None
-            and not previous.is_final
-            and not current.is_final
-            and previous.stream_id == current.stream_id
-            and previous.phrase_id == current.phrase_id
-            and previous.settings_version == current.settings_version
-            and current.revision > previous.revision
-        ):
+        key = phrase_key(item.meta)
+        index = positions.get(key)
+        if index is not None:
+            old = kept[index]
+            replace_old = supersedes(item.meta, old.meta)
             if metrics:
-                metrics.discard(stage, kept[-1], "coalesced")
-            kept[-1] = item  # newer draft replaces the stale one
+                metrics.discard(stage, old if replace_old else item,
+                                "coalesced" if replace_old else "obsolete_revision")
+            if replace_old:
+                kept[index] = item
         else:
+            positions[key] = len(kept)
             kept.append(item)
     return kept
 
@@ -131,6 +134,9 @@ def worker_transcribe(in_queue: queue.Queue[SpeechSegment | AudioStreamEnded], t
                 )
             if stop.is_set() or not is_current(segment.meta):
                 continue
+            if isinstance(in_queue, PendingQueue) and in_queue.expired(segment):
+                in_queue.report_drop(segment, "expired_after_inference")
+                continue
             transcript = Transcript(segment.meta, result.text, result.language,
                                     segment.settings, result.detected_language)
             if on_transcript is not None:
@@ -147,7 +153,9 @@ def worker_transcribe(in_queue: queue.Queue[SpeechSegment | AudioStreamEnded], t
 def worker_translate(in_queue: queue.Queue[Transcript | AudioStreamEnded], translator: TextTranslator,
                      output, stop: threading.Event, *,
                      is_current: Callable[[PhraseMeta], bool] = lambda meta: True,
-                     on_finished: Callable[[], None] | None = None, metrics=None):
+                     on_finished: Callable[[], None] | None = None, metrics=None,
+                     cache_size: int = 128):
+    cache = OrderedDict()
     while not stop.is_set():
         try:
             first = in_queue.get(timeout=0.1)
@@ -168,8 +176,22 @@ def worker_translate(in_queue: queue.Queue[Transcript | AudioStreamEnded], trans
                     metrics.discard("translation", transcript, "obsolete")
                 continue
             target = transcript.settings.target_language
-            with metrics.measure("translation", transcript) if metrics else nullcontext():
-                text = translator.translate(transcript.text, transcript.language, target)
+            cache_key = (transcript.text, transcript.language, target)
+            if cache_key in cache:
+                text = cache[cache_key]
+                cache.move_to_end(cache_key)
+                if metrics:
+                    metrics.reused("translation", transcript)
+            else:
+                with metrics.measure("translation", transcript) if metrics else nullcontext():
+                    text = translator.translate(transcript.text, transcript.language, target)
+                if text and cache_size > 0:
+                    cache[cache_key] = text
+                    if len(cache) > cache_size:
+                        cache.popitem(last=False)
+            if isinstance(in_queue, PendingQueue) and in_queue.expired(transcript):
+                in_queue.report_drop(transcript, "expired_after_inference")
+                continue
             if text and not stop.is_set() and is_current(transcript.meta):
                 translation = Translation(
                     meta=transcript.meta,

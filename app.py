@@ -1,24 +1,26 @@
 """Application lifecycle, settings and presentation policy."""
-import queue
 import threading
 import time
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Callable
 
 from audio_sources import AudioSource
-from config import ProcessingSettings
+from config import ProcessingSettings, QueuePolicy
 from engines import Recognizer, TextTranslator
 from events import ApplicationStatus, AudioStreamEnded, PhraseMeta, Transcript, Translation
 from langs import flores
 from pipeline import worker_segment, worker_transcribe, worker_translate
+from scheduling import PendingQueue
 
 
 class ApplicationController:
     def __init__(self, source: AudioSource, overlay,
                  recognizer_factory: Callable[[], Recognizer],
                  translator_factory: Callable[[], TextTranslator],
-                 settings: ProcessingSettings = ProcessingSettings(), metrics=None):
+                 settings: ProcessingSettings = ProcessingSettings(), metrics=None,
+                 queue_policy: QueuePolicy = QueuePolicy()):
+        self.queue_policy = queue_policy
         self.metrics = metrics
         self.source = source
         self.overlay = overlay
@@ -36,6 +38,9 @@ class ApplicationController:
         overlay.on_close = self.stop
         overlay.is_current = self.is_current
         overlay.metrics = metrics
+        overlay.max_display_lag = queue_policy.max_lag_s
+        if metrics:
+            metrics.add_metadata(queue_policy=asdict(queue_policy), scheduler="bounded-v1")
 
     def get_settings(self) -> ProcessingSettings:
         with self._settings_lock:
@@ -113,7 +118,11 @@ class ApplicationController:
             translator = self._translator_factory()
         if self._stop.is_set():
             return
-        segments, transcripts = queue.Queue(), queue.Queue()
+        def pending(stage):
+            return PendingQueue(self.queue_policy.max_pending, self.queue_policy.max_lag_s,
+                                on_drop=lambda event, reason: self._dropped(stage, event, reason))
+
+        segments, transcripts = pending("recognition"), pending("translation")
         with self._lifecycle_lock:
             if self._stop.is_set():
                 return
@@ -127,7 +136,8 @@ class ApplicationController:
             self._spawn("Recognition", worker_transcribe, segments, recognizer, transcripts, self._stop,
                         is_current=self.is_current, on_transcript=self.on_transcript, metrics=self.metrics)
             self._spawn("Translation", worker_translate, transcripts, translator, self, self._stop,
-                        is_current=self.is_current, on_finished=self._on_finished, metrics=self.metrics)
+                        is_current=self.is_current, on_finished=self._on_finished, metrics=self.metrics,
+                        cache_size=self.queue_policy.translation_cache_size)
             if not self._stop.is_set():
                 try:
                     self.source.start()
@@ -139,6 +149,17 @@ class ApplicationController:
             self._active_stream = stream_id
             self.overlay.clear_results()
         self._status("Listening…")
+
+    def _dropped(self, stage, event, reason):
+        if isinstance(event, AudioStreamEnded):
+            if self.metrics:
+                self.metrics.count(stage + "_boundaries_coalesced")
+            return
+        if self.metrics:
+            self.metrics.discard(stage, event, reason)
+        if event.meta.is_final and reason in ("overflow", "expired", "expired_after_inference"):
+            print(f"[overload] {stage}: skipped phrase {event.meta.phrase_id} ({reason})")
+            self._status("Overloaded — skipped an old phrase to catch up")
 
     def _on_boundary(self, event: AudioStreamEnded):
         if self._stop.is_set():

@@ -126,6 +126,17 @@ class Metrics:
         with self._lock:
             self._pending.pop((stage, self.key(event.meta)), None)
             self.count(f"{stage}_{reason}")
+            if event.meta.is_final and reason in ("overflow", "expired", "expired_after_inference"):
+                self.count(f"{stage}_finals_dropped")
+            self.record("discard", stage=stage, reason=reason, meta=asdict(event.meta))
+
+    def reused(self, stage, event):
+        with self._lock:
+            queued = self._pending.pop((stage, self.key(event.meta)), None)
+            if queued is not None:
+                self._samples[stage + "_wait_s"].append(time.monotonic() - queued)
+            self.count(stage + "_cache_hits")
+            self.record("cache_hit", stage=stage, meta=asdict(event.meta))
 
     @contextmanager
     def measure(self, stage, event=None):
@@ -164,6 +175,7 @@ class Metrics:
             rss = process_rss_bytes()
             cpu_percent = 100 * (cpu - previous_cpu) / max(now - previous_time, 1e-9)
             previous_time, previous_cpu = now, cpu
+            sizes = {name: work.qsize() for name, work in self._queues.items()}
             with self._lock:
                 if self._closed or self._processing_ended is not None:
                     return
@@ -171,7 +183,6 @@ class Metrics:
                     self._samples["cpu_percent_one_core"].append(cpu_percent)
                 if rss is not None:
                     self._samples["rss_mb"].append(rss / 1024 ** 2)
-                sizes = {name: work.qsize() for name, work in self._queues.items()}
                 for name, size in sizes.items():
                     self._samples[name + "_queue_size"].append(size)
                 self.record("resources", cpu_percent_one_core=cpu_percent, rss_bytes=rss, queues=sizes)
