@@ -8,8 +8,11 @@ import sys
 import threading
 import time
 from collections import deque
+from uuid import uuid4
 
 import numpy as np
+
+from events import AudioChunk, PhraseMeta, SpeechSegment
 
 SAMPLE_RATE = 16000
 BLOCK = 1600            # 100 ms per read
@@ -66,19 +69,33 @@ class SpeechSegmenter:
         self._silence_run = 0
         self._since_partial = 0
         self._noise = 0.003
+        self._phrase_id = 0
+        self._revision = 0
+        self._stream_id: str | None = None
+        self._origin = 0.0
+        self._processed_samples = 0
+        self._phrase_start = 0.0
 
-    def push(self, block: np.ndarray) -> list[tuple[np.ndarray, bool]]:
-        """Returns (audio, is_final) pairs."""
-        self._tail = np.concatenate([self._tail, block])
+    def push(self, chunk: AudioChunk) -> list[SpeechSegment]:
+        """Accept contiguous mono chunks from one 16 kHz capture stream."""
+        if chunk.sample_rate != SAMPLE_RATE or chunk.samples.ndim != 1:
+            raise ValueError("Expected mono audio at 16000 Hz")
+        if self._stream_id is None:
+            self._stream_id = chunk.stream_id
+            self._origin = chunk.started_at
+        elif chunk.stream_id != self._stream_id:
+            raise ValueError("Use a new SpeechSegmenter for a new capture stream")
+        self._tail = np.concatenate([self._tail, chunk.samples])
         out = []
         while len(self._tail) >= FRAME:
             frame, self._tail = self._tail[:FRAME], self._tail[FRAME:]
+            self._processed_samples += FRAME
             item = self._feed(frame)
             if item is not None:
                 out.append(item)
         return out
 
-    def _feed(self, frame: np.ndarray) -> tuple[np.ndarray, bool] | None:
+    def _feed(self, frame: np.ndarray) -> SpeechSegment | None:
         rms = float(np.sqrt(np.mean(frame**2)))
         # adaptive noise floor: falls fast, rises slowly, so steady background
         # hiss gets learned but speech never raises the bar mid-phrase
@@ -89,6 +106,12 @@ class SpeechSegmenter:
             if not self._speech:
                 self._speech = True
                 self._buf = list(self._pre)  # pre-roll so the first word survives
+                self._phrase_id += 1
+                self._revision = 0
+                self._phrase_start = self._origin + (
+                    self._processed_samples - FRAME - len(self._pre) * FRAME
+                ) / SAMPLE_RATE
+            self._pre.clear()
             self._buf.append(frame)
             self._speech_frames += 1
             self._silence_run = 0
@@ -100,7 +123,7 @@ class SpeechSegmenter:
                 and self._since_partial >= self.partial_frames
             ):
                 self._since_partial = 0
-                return np.concatenate(self._buf), False  # draft; buffer keeps growing
+                return self._emit(False)  # draft; buffer keeps growing
             return None
 
         self._pre.append(frame)
@@ -112,26 +135,42 @@ class SpeechSegmenter:
                 return self._flush()
         return None
 
-    def _flush(self) -> tuple[np.ndarray, bool] | None:
-        audio = np.concatenate(self._buf) if self._buf else None
+    def _emit(self, final: bool) -> SpeechSegment:
+        self._revision += 1
+        assert self._stream_id is not None
+        return SpeechSegment(
+            meta=PhraseMeta(
+                stream_id=self._stream_id,
+                phrase_id=self._phrase_id,
+                revision=self._revision,
+                started_at=self._phrase_start,
+                ended_at=self._origin + self._processed_samples / SAMPLE_RATE,
+                is_final=final,
+            ),
+            sample_rate=SAMPLE_RATE,
+            samples=np.concatenate(self._buf),
+        )
+
+    def _flush(self) -> SpeechSegment | None:
         # measure the speech itself, not the pre-roll and trailing silence around
         # it, so clicks and notification blips get dropped
         speech_samples = self._speech_frames * FRAME
+        result = self._emit(True) if self._buf and speech_samples >= self.min_samples else None
+        if not self._silence_run:
+            self._pre.clear()  # a forced cut must not reuse old mid-phrase silence
         self._buf = []
         self._speech = False
         self._speech_frames = 0
         self._silence_run = 0
         self._since_partial = 0
-        if audio is None or speech_samples < self.min_samples:
-            return None
-        return audio, True
+        return result
 
 
 class SystemAudio:
     """Loopback capture that follows whatever Windows is playing to."""
 
     def __init__(self, device_name: str | None = None):
-        self.queue: queue.Queue[tuple[np.ndarray, bool]] = queue.Queue()
+        self.queue: queue.Queue[SpeechSegment] = queue.Queue()
         self._pinned = device_name
         self.device_name = device_name or "..."
         self._stop = threading.Event()
@@ -146,7 +185,6 @@ class SystemAudio:
 
     def _run(self):
         sc = _import_soundcard()
-        segmenter = SpeechSegmenter()
         while not self._stop.is_set():
             try:
                 target = self._pinned or str(sc.default_speaker().name)
@@ -155,11 +193,21 @@ class SystemAudio:
                 print(f"[audio] listening to: {target}")
 
                 with mic.recorder(samplerate=SAMPLE_RATE, blocksize=BLOCK) as rec:
-                    checked = time.monotonic()
+                    segmenter = SpeechSegmenter()
+                    stream_id = uuid4().hex
+                    origin = checked = time.monotonic()
+                    captured_samples = 0
                     while not self._stop.is_set():
                         data = rec.record(numframes=BLOCK)
                         mono = data.mean(axis=1) if data.ndim > 1 else data
-                        for item in segmenter.push(mono.astype(np.float32)):
+                        chunk = AudioChunk(
+                            stream_id=stream_id,
+                            started_at=origin + captured_samples / SAMPLE_RATE,
+                            sample_rate=SAMPLE_RATE,
+                            samples=mono.astype(np.float32),
+                        )
+                        captured_samples += len(chunk.samples)
+                        for item in segmenter.push(chunk):
                             self.queue.put(item)
 
                         # follow the user switching headphones/speakers mid-session

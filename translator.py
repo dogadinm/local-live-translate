@@ -44,16 +44,20 @@ class Translator:
         return True
 
     def translate(self, text: str, src_iso: str | None) -> str:
-        if not text.strip():
-            return ""
+        return self.translate_with_target(text, src_iso)[0]
+
+    def translate_with_target(self, text: str, src_iso: str | None) -> tuple[str, str]:
+        """Return the text and the target snapshot actually used for this call."""
         with self._lock:
             tgt_iso = self.tgt_iso
 
+        if not text.strip():
+            return "", tgt_iso
         if src_iso == tgt_iso:
-            return text  # already in the target language — nothing to do
+            return text, tgt_iso  # already in the target language
         src, tgt = flores(src_iso or ""), flores(tgt_iso)
         if src is None:
-            return f"[{src_iso or '?'}: not in the NLLB language set]"
+            return f"[{src_iso or '?'}: not in the NLLB language set]", tgt_iso
 
         # NLLB source format is [src_lang] tokens </s>; built explicitly so we do
         # not depend on the tokenizer's mutable src_lang state across threads
@@ -67,4 +71,4 @@ class Translator:
             beam_size=2,  # 2 = good speed/quality balance for real-time
         )
         out = self.tokenizer.convert_tokens_to_ids(result[0].hypotheses[0])
-        return self.tokenizer.decode(out, skip_special_tokens=True).strip()
+        return self.tokenizer.decode(out, skip_special_tokens=True).strip(), tgt_iso

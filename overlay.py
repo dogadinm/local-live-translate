@@ -4,6 +4,7 @@ from tkinter import ttk
 from typing import Callable
 
 from langs import display, picker_items
+from events import Translation
 
 BG = "#000000"
 FG_SRC = "#9aa0a6"
@@ -23,7 +24,7 @@ class SubtitleOverlay:
         on_source_change: Callable[[str | None], None] | None = None,
         on_target_change: Callable[[str], None] | None = None,
     ):
-        self._queue: queue.Queue[tuple] = queue.Queue()
+        self._queue: queue.Queue[Translation | str] = queue.Queue()
         self.on_source_change = on_source_change
         self.on_target_change = on_target_change
         self._items = picker_items()
@@ -108,12 +109,12 @@ class SubtitleOverlay:
 
     # --- thread-safe API ---------------------------------------------------
 
-    def update(self, text: str, final: bool = True):
+    def update(self, translation: Translation):
         """Drafts are shown dimmed so it is obvious they may still be rewritten."""
-        self._queue.put(("text", text, final))
+        self._queue.put(translation)
 
     def set_detected_language(self, iso: str):
-        self._queue.put(("lang", iso, None))
+        self._queue.put(iso)
 
     # --- main loop ---------------------------------------------------------
 
@@ -124,11 +125,13 @@ class SubtitleOverlay:
     def _poll(self):
         try:
             while True:
-                kind, first, second = self._queue.get_nowait()
-                if kind == "text":
-                    self.text_label.config(text=first, fg=FG_DST if second else FG_SRC)
-                elif kind == "lang" and self.source_picker.get() == AUTO:
-                    self.status.config(text=f"detected: {display(first)}")
+                event = self._queue.get_nowait()
+                if isinstance(event, Translation):
+                    self.text_label.config(
+                        text=event.text, fg=FG_DST if event.meta.is_final else FG_SRC
+                    )
+                elif self.source_picker.get() == AUTO:
+                    self.status.config(text=f"detected: {display(event)}")
         except queue.Empty:
             pass
         self.root.after(80, self._poll)

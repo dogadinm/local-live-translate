@@ -62,13 +62,29 @@ effect immediately. Drag the strip with the mouse, quit with `Esc` or `✕`.
 python test_segmenter.py
 ```
 
-No dependencies needed. If you install pytest, `pytest test_segmenter.py` works
+Uses the runtime dependencies, without loading model weights or opening audio
+devices or windows. If you install pytest, `pytest test_segmenter.py` works
 too — the tests are written to suit both.
 
-They cover the two pieces of pure logic in the pipeline: cutting speech into
-phrases, and discarding drafts a newer draft has superseded. Everything else
-needs a GPU, a sound card or a screen; these two run on a synthetic signal and
-catch exactly the bugs that are invisible by eye.
+They cover speech segmentation, event identities and timestamps, draft
+coalescing, metadata propagation through workers and the overlay, and target
+language changes during translation. Audio is synthetic and model inference
+and UI widgets are replaced with test doubles.
+
+## Pipeline messages
+
+`events.py` defines the stage boundaries: `AudioChunk` → `SpeechSegment` →
+`Transcript` → `Translation`. Drafts and finals share a `PhraseMeta` containing
+the capture stream ID, phrase ID, revision, audio timestamps, final flag and
+settings version. Recognition and translation preserve this metadata through
+the overlay's queue. Translation also records the target actually used.
+
+Each recorder opening creates a new stream ID and segmenter. Timestamps use a
+monotonic capture origin plus sample offsets; they are audio boundaries, not
+model completion times. Published NumPy buffers must not be modified.
+`settings_version` is currently zero, reserved for a future settings controller.
+Queue coalescing replaces only consecutive drafts of the same stream, phrase
+and settings version with a strictly newer revision. Finals are retained.
 
 ## How the audio is captured
 

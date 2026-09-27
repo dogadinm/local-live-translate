@@ -1,3 +1,8 @@
+"""Messages passed between stages; published audio arrays must not be mutated.
+
+Audio timestamps use the capture stream's monotonic clock and sample offsets.
+settings_version remains zero until the application controller owns settings.
+"""
 from dataclasses import dataclass
 
 import numpy as np
@@ -19,7 +24,7 @@ class PhraseMeta:
     started_at: float
     ended_at: float
     is_final: bool
-    settings_version: int
+    settings_version: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,6 +4,7 @@ import sys
 import threading
 
 from pipeline import worker_transcribe, worker_translate
+from events import Transcript
 
 
 def parse_args():
@@ -55,7 +56,7 @@ def build(args):
 
 def run(audio, transcriber, translator, overlay):
     """Start the workers, give the main thread to the window, clean up after."""
-    translate_queue: queue.Queue[tuple[str, str, bool]] = queue.Queue()
+    translate_queue: queue.Queue[Transcript] = queue.Queue()
     stop = threading.Event()
 
     for target, worker_args in (
