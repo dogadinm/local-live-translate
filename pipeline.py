@@ -1,4 +1,4 @@
-"""The two worker threads between the microphone queue and the screen.
+"""Source-independent segmentation, recognition and translation workers.
 
 Each stage pulls from a queue, does its one job, and pushes to the next. They
 run independently so a slow translation never blocks the next recognition.
@@ -7,9 +7,41 @@ import queue
 import threading
 from typing import TypeVar
 
-from events import SpeechSegment, Transcript, Translation
+from audio import SpeechSegmenter
+from events import AudioChunk, AudioStreamEnded, SpeechSegment, Transcript, Translation
 
-Event = TypeVar("Event", SpeechSegment, Transcript)
+Event = TypeVar("Event", bound=SpeechSegment | Transcript | AudioStreamEnded)
+
+
+def worker_segment(in_queue: queue.Queue[AudioChunk | AudioStreamEnded],
+                   out_queue: queue.Queue[SpeechSegment | AudioStreamEnded],
+                   stop: threading.Event):
+    segmenter = None
+    stream_id = None
+    while not stop.is_set():
+        try:
+            event = in_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if isinstance(event, AudioStreamEnded):
+            if segmenter is not None and (event.stream_id == stream_id or event.source_finished):
+                for segment in segmenter.finish():
+                    out_queue.put(segment)
+                segmenter = None
+                stream_id = None
+            out_queue.put(event)
+            if event.source_finished:
+                return
+        else:
+            if event.stream_id != stream_id:
+                if segmenter is not None:
+                    for segment in segmenter.finish():
+                        out_queue.put(segment)
+                    out_queue.put(AudioStreamEnded(stream_id, "stream_changed"))
+                segmenter = SpeechSegmenter()
+                stream_id = event.stream_id
+            for segment in segmenter.push(event):
+                out_queue.put(segment)
 
 
 def drain(work_queue: queue.Queue[Event], first: Event) -> list[Event]:
@@ -28,7 +60,10 @@ def drain(work_queue: queue.Queue[Event], first: Event) -> list[Event]:
 
     kept = []
     for item in items:
-        previous = kept[-1].meta if kept else None
+        if isinstance(item, AudioStreamEnded):
+            kept.append(item)
+            continue
+        previous = kept[-1].meta if kept and not isinstance(kept[-1], AudioStreamEnded) else None
         current = item.meta
         if (
             previous is not None
@@ -45,13 +80,21 @@ def drain(work_queue: queue.Queue[Event], first: Event) -> list[Event]:
     return kept
 
 
-def worker_transcribe(audio_cap, transcriber, out_queue: queue.Queue[Transcript], stop: threading.Event):
+def worker_transcribe(in_queue: queue.Queue[SpeechSegment | AudioStreamEnded], transcriber,
+                      out_queue: queue.Queue[Transcript | AudioStreamEnded], stop: threading.Event):
     while not stop.is_set():
         try:
-            first = audio_cap.queue.get(timeout=1)
+            first = in_queue.get(timeout=0.1)
         except queue.Empty:
             continue
-        for segment in drain(audio_cap.queue, first):
+        for segment in drain(in_queue, first):
+            if stop.is_set():
+                return
+            if isinstance(segment, AudioStreamEnded):
+                out_queue.put(segment)
+                if segment.source_finished:
+                    return
+                continue
             text, language = transcriber.transcribe(
                 segment.samples, partial=not segment.meta.is_final
             )
@@ -60,13 +103,21 @@ def worker_transcribe(audio_cap, transcriber, out_queue: queue.Queue[Transcript]
                 out_queue.put(Transcript(meta=segment.meta, text=text, language=language))
 
 
-def worker_translate(in_queue: queue.Queue[Transcript], translator, overlay, stop: threading.Event):
+def worker_translate(in_queue: queue.Queue[Transcript | AudioStreamEnded], translator,
+                     overlay, stop: threading.Event):
     while not stop.is_set():
         try:
-            first = in_queue.get(timeout=1)
+            first = in_queue.get(timeout=0.1)
         except queue.Empty:
             continue
         for transcript in drain(in_queue, first):
+            if stop.is_set():
+                return
+            if isinstance(transcript, AudioStreamEnded):
+                if transcript.source_finished:
+                    print("[pipeline] source finished; all queued phrases processed")
+                    return
+                continue
             text, target = translator.translate_with_target(transcript.text, transcript.language)
             if text:
                 translation = Translation(

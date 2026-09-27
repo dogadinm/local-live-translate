@@ -17,6 +17,15 @@ class AudioChunk:
 
 
 @dataclass(frozen=True, slots=True)
+class AudioStreamEnded:
+    """Ordered boundary; source_finished also ends downstream worker loops."""
+    stream_id: str
+    reason: str = "eof"
+    source_finished: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PhraseMeta:
     stream_id: str
     phrase_id: int

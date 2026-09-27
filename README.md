@@ -41,6 +41,7 @@ python main.py                  # translate into Russian, source detected automa
 python main.py --tgt en         # into English
 python main.py --src cs         # pin the source language
 python main.py --list-devices   # show output devices
+python main.py --audio-file sample.wav  # read a PCM16 mono 16 kHz WAV
 ```
 
 Whisper models are downloaded on first run (~1.6 GB for turbo).
@@ -51,6 +52,13 @@ Whisper models are downloaded on first run (~1.6 GB for turbo).
 | `--src` | Source language. Defaults to `Auto` — detected again on every phrase |
 | `--whisper` | Whisper model, `large-v3-turbo` by default. Smaller and faster: `small`, `medium` |
 | `--out-device` | Listen to a specific output device instead of the current one |
+| `--audio-file` | Read a PCM16 mono 16 kHz WAV instead of system audio; conflicts with `--out-device` |
+
+File input is paced at the recording's original speed, but does not play sound
+through your speakers. After EOF the last phrase is finalized and queued work
+is processed; the subtitle window stays open until you close it. Unsupported
+WAV formats are rejected before loading the models. For unpaced tests,
+instantiate `FileAudioSource(path, realtime=False)` directly.
 
 The window has two dropdowns: **Source** — the spoken language (`Auto`, or a
 specific one, which then overrides detection) — and **Translate to**. Both take
@@ -60,16 +68,20 @@ effect immediately. Drag the strip with the mouse, quit with `Esc` or `✕`.
 
 ```
 python test_segmenter.py
+python -m unittest test_audio_sources
 ```
 
 Uses the runtime dependencies, without loading model weights or opening audio
-devices or windows. If you install pytest, `pytest test_segmenter.py` works
+devices or windows. If you install pytest, `pytest test_segmenter.py test_audio_sources.py` works
 too — the tests are written to suit both.
 
 They cover speech segmentation, event identities and timestamps, draft
 coalescing, metadata propagation through workers and the overlay, and target
 language changes during translation. Audio is synthetic and model inference
 and UI widgets are replaced with test doubles.
+Source tests also cover WAV samples, EOF tails, device boundaries, bounded
+queue shutdown, capture reopening and propagation of completion through all
+three workers.
 
 ## Pipeline messages
 
@@ -79,12 +91,31 @@ the capture stream ID, phrase ID, revision, audio timestamps, final flag and
 settings version. Recognition and translation preserve this metadata through
 the overlay's queue. Translation also records the target actually used.
 
-Each recorder opening creates a new stream ID and segmenter. Timestamps use a
+`audio_sources.py` owns the `AudioSource` protocol, `SystemLoopbackSource` and
+`FileAudioSource`. Sources only produce audio blocks and ordered
+`AudioStreamEnded` boundaries. `audio.py` owns speech segmentation, and
+`pipeline.worker_segment` connects either source to the recognition queue.
+
+Each recorder opening creates a new stream ID; the segmentation worker creates
+a fresh segmenter for it. Timestamps use a
 monotonic capture origin plus sample offsets; they are audio boundaries, not
 model completion times. Published NumPy buffers must not be modified.
 `settings_version` is currently zero, reserved for a future settings controller.
 Queue coalescing replaces only consecutive drafts of the same stream, phrase
 and settings version with a strictly newer revision. Finals are retained.
+
+`SpeechSegmenter.finish()` finalizes remaining speech including an incomplete
+30 ms frame, without padding its samples or timestamps. EOF travels through
+recognition and translation after the final phrase; closing the application
+instead stops workers without draining pending work. In-flight model calls
+cannot be cancelled, so shutdown only waits briefly for those workers.
+
+The source queue holds at most 20 events (about two seconds of audio blocks).
+File reading waits for capacity. Live capture treats a queue timeout as a
+discontinuity: it closes the recorder, publishes an error boundary, and retries
+with a new stream ID. Dropped audio is never silently joined to later audio.
+Recognition and translation queues are still unbounded; their overload policy
+is a separate future step.
 
 ## How the audio is captured
 

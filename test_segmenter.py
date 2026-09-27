@@ -222,7 +222,7 @@ def test_workers_preserve_metadata_to_overlay():
             stop.set()
             return "hello", "en"
 
-        worker_transcribe(SimpleNamespace(queue=audio_queue), SimpleNamespace(transcribe=recognize), text_queue, stop)
+        worker_transcribe(audio_queue, SimpleNamespace(transcribe=recognize), text_queue, stop)
         recognized = text_queue.get_nowait()
         assert recognized.meta is meta
         text_queue.put(recognized)
