@@ -1,13 +1,7 @@
-# Runtime dependencies — no torch needed here.
-# torch is required only once, by convert_model.py, and can be removed after.
-#
-# Versions are pinned on purpose. transformers 5.x changed how NLLB tokenizer
-# files are written, which silently broke the conversion step, so an unpinned
-# install is the most likely way this project breaks for someone else.
-# Bump them deliberately and re-run test_segmenter.py plus one real capture.
-
 faster-whisper==1.2.1
 ctranslate2==4.8.1
+# CUDA 12 cuBLAS runtime; device.py registers its DLL directory on Windows.
+nvidia-cublas-cu12==12.6.4.1; sys_platform == "win32"
 transformers==5.16.1
 tokenizers==0.23.1
 sentencepiece==0.2.2
