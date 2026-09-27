@@ -1,11 +1,10 @@
-import threading
 from pathlib import Path
 
 import ctranslate2
 from transformers import NllbTokenizer  # tokenizer only — no torch needed
 
 from device import best_device
-from langs import display, flores
+from langs import flores
 
 CACHE_DIR = Path.home() / ".cache" / "live_translate" / "nllb-ct2"
 
@@ -18,7 +17,7 @@ class Translator:
     rather than stored, because it is a property of that audio, not of the app.
     """
 
-    def __init__(self, model_dir: Path = CACHE_DIR, target: str = "ru"):
+    def __init__(self, model_dir: Path = CACHE_DIR):
         if not model_dir.exists():
             raise RuntimeError(
                 f"Model not found: {model_dir}\nRun first:  python convert_model.py"
@@ -32,32 +31,17 @@ class Translator:
         )
         # NllbTokenizer works without torch (pure sentencepiece)
         self.tokenizer = NllbTokenizer.from_pretrained(str(model_dir))
-        self._lock = threading.Lock()
-        self.tgt_iso = target
-
-    def set_target(self, iso: str) -> bool:
-        if flores(iso) is None:
-            return False
-        with self._lock:
-            self.tgt_iso = iso
-        print(f"[nllb] target language: {display(iso)}")
-        return True
-
-    def translate(self, text: str, src_iso: str | None) -> str:
-        return self.translate_with_target(text, src_iso)[0]
-
-    def translate_with_target(self, text: str, src_iso: str | None) -> tuple[str, str]:
-        """Return the text and the target snapshot actually used for this call."""
-        with self._lock:
-            tgt_iso = self.tgt_iso
-
+    def translate(self, text: str, src_iso: str | None, tgt_iso: str) -> str:
+        """Translate using an explicit target belonging to this job."""
+        if flores(tgt_iso) is None:
+            raise ValueError(f"Unsupported target language: {tgt_iso}")
         if not text.strip():
-            return "", tgt_iso
+            return ""
         if src_iso == tgt_iso:
-            return text, tgt_iso  # already in the target language
+            return text  # already in the target language
         src, tgt = flores(src_iso or ""), flores(tgt_iso)
         if src is None:
-            return f"[{src_iso or '?'}: not in the NLLB language set]", tgt_iso
+            return f"[{src_iso or '?'}: not in the NLLB language set]"
 
         # NLLB source format is [src_lang] tokens </s>; built explicitly so we do
         # not depend on the tokenizer's mutable src_lang state across threads
@@ -71,4 +55,4 @@ class Translator:
             beam_size=2,  # 2 = good speed/quality balance for real-time
         )
         out = self.tokenizer.convert_tokens_to_ids(result[0].hypotheses[0])
-        return self.tokenizer.decode(out, skip_special_tokens=True).strip(), tgt_iso
+        return self.tokenizer.decode(out, skip_special_tokens=True).strip()

@@ -5,28 +5,44 @@ run independently so a slow translation never blocks the next recognition.
 """
 import queue
 import threading
-from typing import TypeVar
+from dataclasses import replace
+from typing import Callable, TypeVar
 
 from audio import SpeechSegmenter
-from events import AudioChunk, AudioStreamEnded, SpeechSegment, Transcript, Translation
+from config import ProcessingSettings
+from engines import Recognizer, TextTranslator
+from events import AudioChunk, AudioStreamEnded, PhraseMeta, SpeechSegment, Transcript, Translation
 
 Event = TypeVar("Event", bound=SpeechSegment | Transcript | AudioStreamEnded)
 
 
 def worker_segment(in_queue: queue.Queue[AudioChunk | AudioStreamEnded],
                    out_queue: queue.Queue[SpeechSegment | AudioStreamEnded],
-                   stop: threading.Event):
+                   stop: threading.Event, *,
+                   get_settings: Callable[[], ProcessingSettings] = ProcessingSettings,
+                   on_boundary: Callable[[AudioStreamEnded], None] | None = None,
+                   on_stream: Callable[[str], None] | None = None):
     segmenter = None
     stream_id = None
+
+    def publish(segment):
+        settings = get_settings()
+        out_queue.put(replace(segment, settings=settings,
+                              meta=replace(segment.meta, settings_version=settings.version)))
+
     while not stop.is_set():
         try:
             event = in_queue.get(timeout=0.1)
         except queue.Empty:
             continue
         if isinstance(event, AudioStreamEnded):
+            if on_boundary is not None:
+                on_boundary(event)
+            if stop.is_set():
+                return
             if segmenter is not None and (event.stream_id == stream_id or event.source_finished):
                 for segment in segmenter.finish():
-                    out_queue.put(segment)
+                    publish(segment)
                 segmenter = None
                 stream_id = None
             out_queue.put(event)
@@ -36,12 +52,14 @@ def worker_segment(in_queue: queue.Queue[AudioChunk | AudioStreamEnded],
             if event.stream_id != stream_id:
                 if segmenter is not None:
                     for segment in segmenter.finish():
-                        out_queue.put(segment)
+                        publish(segment)
                     out_queue.put(AudioStreamEnded(stream_id, "stream_changed"))
                 segmenter = SpeechSegmenter()
                 stream_id = event.stream_id
+                if on_stream is not None:
+                    on_stream(stream_id)
             for segment in segmenter.push(event):
-                out_queue.put(segment)
+                publish(segment)
 
 
 def drain(work_queue: queue.Queue[Event], first: Event) -> list[Event]:
@@ -80,8 +98,10 @@ def drain(work_queue: queue.Queue[Event], first: Event) -> list[Event]:
     return kept
 
 
-def worker_transcribe(in_queue: queue.Queue[SpeechSegment | AudioStreamEnded], transcriber,
-                      out_queue: queue.Queue[Transcript | AudioStreamEnded], stop: threading.Event):
+def worker_transcribe(in_queue: queue.Queue[SpeechSegment | AudioStreamEnded], transcriber: Recognizer,
+                      out_queue: queue.Queue[Transcript | AudioStreamEnded], stop: threading.Event, *,
+                      is_current: Callable[[PhraseMeta], bool] = lambda meta: True,
+                      on_transcript: Callable[[Transcript], None] | None = None):
     while not stop.is_set():
         try:
             first = in_queue.get(timeout=0.1)
@@ -95,16 +115,26 @@ def worker_transcribe(in_queue: queue.Queue[SpeechSegment | AudioStreamEnded], t
                 if segment.source_finished:
                     return
                 continue
-            text, language = transcriber.transcribe(
-                segment.samples, partial=not segment.meta.is_final
+            if not is_current(segment.meta):
+                continue
+            result = transcriber.transcribe(
+                segment.samples, partial=not segment.meta.is_final, settings=segment.settings
             )
-            if text:
-                print(f"[{language}]{'' if segment.meta.is_final else ' ~'} {text}")
-                out_queue.put(Transcript(meta=segment.meta, text=text, language=language))
+            if stop.is_set() or not is_current(segment.meta):
+                continue
+            transcript = Transcript(segment.meta, result.text, result.language,
+                                    segment.settings, result.detected_language)
+            if on_transcript is not None:
+                on_transcript(transcript)
+            if result.text:
+                print(f"[{result.language}]{'' if segment.meta.is_final else ' ~'} {result.text}")
+                out_queue.put(transcript)
 
 
-def worker_translate(in_queue: queue.Queue[Transcript | AudioStreamEnded], translator,
-                     overlay, stop: threading.Event):
+def worker_translate(in_queue: queue.Queue[Transcript | AudioStreamEnded], translator: TextTranslator,
+                     output, stop: threading.Event, *,
+                     is_current: Callable[[PhraseMeta], bool] = lambda meta: True,
+                     on_finished: Callable[[], None] | None = None):
     while not stop.is_set():
         try:
             first = in_queue.get(timeout=0.1)
@@ -116,10 +146,15 @@ def worker_translate(in_queue: queue.Queue[Transcript | AudioStreamEnded], trans
             if isinstance(transcript, AudioStreamEnded):
                 if transcript.source_finished:
                     print("[pipeline] source finished; all queued phrases processed")
+                    if on_finished is not None:
+                        on_finished()
                     return
                 continue
-            text, target = translator.translate_with_target(transcript.text, transcript.language)
-            if text:
+            if not is_current(transcript.meta):
+                continue
+            target = transcript.settings.target_language
+            text = translator.translate(transcript.text, transcript.language, target)
+            if text and not stop.is_set() and is_current(transcript.meta):
                 translation = Translation(
                     meta=transcript.meta,
                     source_text=transcript.text,
@@ -128,4 +163,4 @@ def worker_translate(in_queue: queue.Queue[Transcript | AudioStreamEnded], trans
                     target_language=target,
                 )
                 print(f"  ->{'' if translation.meta.is_final else ' ~'} {text}")
-                overlay.update(translation)
+                output.update(translation)

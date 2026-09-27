@@ -14,7 +14,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from audio import FRAME, SAMPLE_RATE, SpeechSegmenter
-from events import AudioChunk, PhraseMeta, SpeechSegment, Transcript, Translation
+from config import ProcessingSettings
+from events import AudioChunk, AudioStreamEnded, PhraseMeta, RecognitionResult, SpeechSegment, Transcript, Translation
 from pipeline import drain, worker_transcribe, worker_translate
 
 rng = np.random.default_rng(0)
@@ -210,43 +211,45 @@ def test_segmenter_rejects_mixed_streams_and_wrong_audio_format():
 def test_workers_preserve_metadata_to_overlay():
     for final in (False, True):
         meta = transcript(final=final, settings_version=7).meta
-        segment = SpeechSegment(meta, SAMPLE_RATE, speech(1.0))
+        settings = ProcessingSettings(target_language="cs", version=7)
+        segment = SpeechSegment(meta, SAMPLE_RATE, speech(1.0), settings)
         audio_queue = queue.Queue()
         audio_queue.put(segment)
+        audio_queue.put(AudioStreamEnded(meta.stream_id, source_finished=True))
         text_queue = queue.Queue()
         stop = threading.Event()
 
-        def recognize(audio, partial):
+        def recognize(audio, partial, *, settings):
             assert audio is segment.samples
             assert partial is not final
-            stop.set()
-            return "hello", "en"
+            assert settings is segment.settings
+            return RecognitionResult("hello", "en", "en")
 
         worker_transcribe(audio_queue, SimpleNamespace(transcribe=recognize), text_queue, stop)
         recognized = text_queue.get_nowait()
         assert recognized.meta is meta
+        assert recognized.settings is settings
+        assert isinstance(text_queue.get_nowait(), AudioStreamEnded)
         text_queue.put(recognized)
-        stop.clear()
+        text_queue.put(AudioStreamEnded(meta.stream_id, source_finished=True))
         output = []
 
-        def translate(text, language):
+        def translate(text, language, target):
             assert (text, language) == ("hello", "en")
-            stop.set()
-            return "ahoj", "cs"
+            assert target == "cs"
+            return "ahoj"
 
-        worker_translate(text_queue, SimpleNamespace(translate_with_target=translate),
+        worker_translate(text_queue, SimpleNamespace(translate=translate),
                          SimpleNamespace(update=output.append), stop)
         assert output == [Translation(meta, "hello", "ahoj", "en", "cs")]
         assert output[0].meta is meta
 
 
-def test_translation_reports_target_used_even_if_picker_changes_mid_call():
+def test_translation_uses_explicit_target_without_mutable_model_settings():
     from translator import Translator
     from langs import flores
 
     translator = Translator.__new__(Translator)  # exercise routing without loading weights
-    translator._lock = threading.Lock()
-    translator.tgt_iso = "cs"
     translator.tokenizer = SimpleNamespace(
         encode=lambda text, **kwargs: [1],
         convert_ids_to_tokens=lambda ids: ["hello"],
@@ -256,16 +259,13 @@ def test_translation_reports_target_used_even_if_picker_changes_mid_call():
 
     def infer(tokens, **kwargs):
         assert kwargs["target_prefix"] == [[flores("cs")]]
-        translator.set_target("ru")
         return [SimpleNamespace(hypotheses=[["ahoj"]])]
 
     translator.translator = SimpleNamespace(translate_batch=infer)
-    assert translator.translate_with_target("hello", "en") == ("ahoj", "cs")
-    assert translator.tgt_iso == "ru"
-    assert translator.translate_with_target("", "en") == ("", "ru")
-    assert translator.translate_with_target("already translated", "ru") == ("already translated", "ru")
-    assert translator.translate_with_target("hello", "unknown")[1] == "ru"
-    assert translator.translate("already translated", "ru") == "already translated"
+    assert translator.translate("hello", "en", "cs") == "ahoj"
+    assert translator.translate("", "en", "ru") == ""
+    assert translator.translate("already translated", "ru", "ru") == "already translated"
+    assert "not in the NLLB" in translator.translate("hello", "unknown", "ru")
 
 
 def test_overlay_keeps_event_until_display_and_styles_drafts_and_finals():
@@ -274,6 +274,7 @@ def test_overlay_keeps_event_until_display_and_styles_drafts_and_finals():
 
     overlay = SubtitleOverlay.__new__(SubtitleOverlay)
     overlay._queue = queue.Queue()
+    overlay.is_current = lambda meta: True
     rendered = []
     statuses = []
     callbacks = []
@@ -290,7 +291,7 @@ def test_overlay_keeps_event_until_display_and_styles_drafts_and_finals():
         events.append(queued)
     for event in events:
         overlay.update(event)
-    overlay.set_detected_language("en")
+    overlay.show_transcript(replace(transcript(), detected_language="en"))
     overlay._poll()
     assert rendered == [{"text": "ahoj", "fg": FG_SRC}, {"text": "ahoj", "fg": FG_DST}]
     assert statuses == [{"text": f"detected: {display('en')}"}]

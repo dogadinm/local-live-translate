@@ -4,7 +4,7 @@ from tkinter import ttk
 from typing import Callable
 
 from langs import display, picker_items
-from events import Translation
+from events import ApplicationStatus, Transcript, Translation
 
 BG = "#000000"
 FG_SRC = "#9aa0a6"
@@ -24,7 +24,10 @@ class SubtitleOverlay:
         on_source_change: Callable[[str | None], None] | None = None,
         on_target_change: Callable[[str], None] | None = None,
     ):
-        self._queue: queue.Queue[Translation | str] = queue.Queue()
+        self._queue: queue.Queue[Translation | Transcript | ApplicationStatus | None] = queue.Queue()
+        self.is_current = lambda meta: True
+        self.on_close: Callable[[], None] | None = None
+        self._closed = False
         self.on_source_change = on_source_change
         self.on_target_change = on_target_change
         self._items = picker_items()
@@ -69,11 +72,13 @@ class SubtitleOverlay:
         tk.Button(
             bar, text="✕", font=(FONT, 10), fg=FG_DIM, bg=BG,
             relief="flat", bd=0, activebackground=BG, activeforeground="#ff6b6b",
-            command=root.destroy,
+            command=self.close,
         ).pack(side="right")
 
         self.status = tk.Label(bar, text="", font=(FONT, 10), fg=FG_DIM, bg=BG)
         self.status.pack(side="right", padx=(0, 16))
+        self.application_status = tk.Label(root, text="", font=(FONT, 9), fg=FG_DIM, bg=BG)
+        self.application_status.pack(fill="x", padx=16)
 
         self.text_label = tk.Label(
             root, text="Waiting for speech…", font=(FONT, 21, "bold"), fg=FG_DST, bg=BG,
@@ -84,7 +89,8 @@ class SubtitleOverlay:
         for widget in (root, bar, self.text_label):
             widget.bind("<Button-1>", self._drag_start)
             widget.bind("<B1-Motion>", self._drag_move)
-        root.bind("<Escape>", lambda _: root.destroy())
+        root.bind("<Escape>", lambda _: self.close())
+        root.protocol("WM_DELETE_WINDOW", self.close)
 
     def _source_changed(self, _event):
         label = self.source_picker.get()
@@ -113,8 +119,25 @@ class SubtitleOverlay:
         """Drafts are shown dimmed so it is obvious they may still be rewritten."""
         self._queue.put(translation)
 
-    def set_detected_language(self, iso: str):
-        self._queue.put(iso)
+    def show_transcript(self, transcript: Transcript):
+        self._queue.put(transcript)
+
+    def clear_results(self):
+        self._queue.put(None)
+
+    def set_status(self, status: ApplicationStatus):
+        self._queue.put(status)
+
+    def close(self):
+        """Main-thread shutdown; model calls may still be finishing in the background."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.on_close is not None:
+                self.on_close()
+        finally:
+            self.root.destroy()
 
     # --- main loop ---------------------------------------------------------
 
@@ -126,12 +149,19 @@ class SubtitleOverlay:
         try:
             while True:
                 event = self._queue.get_nowait()
-                if isinstance(event, Translation):
+                if isinstance(event, (Translation, Transcript)) and not self.is_current(event.meta):
+                    continue
+                if event is None:
+                    self.text_label.config(text="")
+                    self.status.config(text="")
+                elif isinstance(event, ApplicationStatus):
+                    self.application_status.config(text=event.message, fg="#ff6b6b" if event.is_error else FG_DIM)
+                elif isinstance(event, Translation):
                     self.text_label.config(
                         text=event.text, fg=FG_DST if event.meta.is_final else FG_SRC
                     )
-                elif self.source_picker.get() == AUTO:
-                    self.status.config(text=f"detected: {display(event)}")
+                elif event.detected_language and self.source_picker.get() == AUTO:
+                    self.status.config(text=f"detected: {display(event.detected_language)}")
         except queue.Empty:
             pass
         self.root.after(80, self._poll)

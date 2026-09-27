@@ -62,17 +62,18 @@ instantiate `FileAudioSource(path, realtime=False)` directly.
 
 The window has two dropdowns: **Source** — the spoken language (`Auto`, or a
 specific one, which then overrides detection) — and **Translate to**. Both take
-effect immediately. Drag the strip with the mouse, quit with `Esc` or `✕`.
+effect for the next emitted draft or final. Results using previous settings
+are discarded. Drag the strip with the mouse, quit with `Esc` or `✕`.
 
 ## Tests
 
 ```
 python test_segmenter.py
-python -m unittest test_audio_sources
+python -m unittest test_audio_sources test_app
 ```
 
 Uses the runtime dependencies, without loading model weights or opening audio
-devices or windows. If you install pytest, `pytest test_segmenter.py test_audio_sources.py` works
+devices or windows. If you install pytest, `pytest test_segmenter.py test_audio_sources.py test_app.py` works
 too — the tests are written to suit both.
 
 They cover speech segmentation, event identities and timestamps, draft
@@ -82,6 +83,28 @@ and UI widgets are replaced with test doubles.
 Source tests also cover WAV samples, EOF tails, device boundaries, bounded
 queue shutdown, capture reopening and propagation of completion through all
 three workers.
+Controller tests cover settings changes during inference, stale queued UI
+updates, source and model failures, EOF completion and shutdown during loading.
+
+## Application control
+
+`app.ApplicationController` owns startup, shutdown, language settings, the
+selected audio source and worker error handling. `main.py` only parses CLI
+options and assembles the application. Models load in the background while the
+window displays progress. Fatal errors stop processing and stay visible in the
+window; recoverable capture errors show a reconnecting status.
+
+`config.ProcessingSettings` is immutable. The segmentation worker attaches a
+snapshot to each emitted draft or final. Source/target language changes bump
+its version; every downstream stage uses that same snapshot. Obsolete work is
+skipped before inference, checked again after inference, and checked once more
+by the UI immediately before display. A new draft of an ongoing phrase can use
+the new settings; a job already running never changes language midway through.
+
+`engines.py` defines model interfaces. Whisper returns both the language of its
+text and the detected audio language (different when translating directly into
+English). The controller forwards detection results to the UI. Engines neither
+read picker state nor call window methods.
 
 ## Pipeline messages
 
@@ -100,7 +123,7 @@ Each recorder opening creates a new stream ID; the segmentation worker creates
 a fresh segmenter for it. Timestamps use a
 monotonic capture origin plus sample offsets; they are audio boundaries, not
 model completion times. Published NumPy buffers must not be modified.
-`settings_version` is currently zero, reserved for a future settings controller.
+`settings_version` identifies the controller's snapshot attached to each job.
 Queue coalescing replaces only consecutive drafts of the same stream, phrase
 and settings version with a strictly newer revision. Finals are retained.
 
@@ -136,9 +159,10 @@ pause. Drafts are shown dimmed and the final version replaces them in white.
 Mid-phrase they can be wrong — the meaning only settles at the end. That is a
 deliberate trade for showing text immediately.
 
-**An English target can skip a model.** Whisper translates into English on its
-own, so with `--tgt en` the NLLB stage is dropped entirely — one model less and
-about half a second of latency saved.
+**An English target can skip translation inference.** Compatible Whisper
+models translate into English directly, so `--tgt en` bypasses NLLB inference.
+NLLB is still loaded at startup; loading it only when needed is a later
+resource optimization.
 
 This only works on models trained for the translation task, and the default
 `large-v3-turbo` is not one of them: turbo is a pruned large-v3 retrained on
@@ -146,7 +170,7 @@ transcription alone, and the distil models are English-only. Asked to translate,
 they do not fail — they silently transcribe, which looks like working code
 returning untranslated text. So the shortcut is taken only for a model that
 supports it (`small`, `medium`, `large-v3`), and everything else goes through
-NLLB as usual. The startup log says which route is in use.
+NLLB as usual.
 
 ## Limits
 

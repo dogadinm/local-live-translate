@@ -1,11 +1,12 @@
 """Messages passed between stages; published audio arrays must not be mutated.
 
 Audio timestamps use the capture stream's monotonic clock and sample offsets.
-settings_version remains zero until the application controller owns settings.
+Each job carries an immutable settings snapshot owned by the controller.
 """
 from dataclasses import dataclass
 
 import numpy as np
+from config import ProcessingSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +42,7 @@ class SpeechSegment:
     meta: PhraseMeta
     sample_rate: int
     samples: np.ndarray
+    settings: ProcessingSettings = ProcessingSettings()
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,8 @@ class Transcript:
     meta: PhraseMeta
     text: str
     language: str | None
+    settings: ProcessingSettings = ProcessingSettings()
+    detected_language: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,3 +61,16 @@ class Translation:
     text: str
     source_language: str | None
     target_language: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecognitionResult:
+    text: str
+    language: str | None
+    detected_language: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationStatus:
+    message: str
+    is_error: bool = False

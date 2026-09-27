@@ -14,8 +14,9 @@ from unittest.mock import patch
 import numpy as np
 
 from audio import SpeechSegmenter
+from config import ProcessingSettings
 from audio_sources import BLOCK, SAMPLE_RATE, FileAudioSource, SystemLoopbackSource
-from events import AudioChunk, AudioStreamEnded
+from events import AudioChunk, AudioStreamEnded, RecognitionResult
 from main import parse_args
 from pipeline import worker_segment, worker_transcribe, worker_translate
 
@@ -146,9 +147,9 @@ class AudioSourcesTests(unittest.TestCase):
         for event in events:
             incoming.put(event)
         stop = threading.Event()
-        worker_segment(incoming, segments, stop)
-        recognizer = SimpleNamespace(transcribe=lambda samples, partial: ("hello", "en"))
-        translator = SimpleNamespace(translate_with_target=lambda text, language: ("ahoj", "cs"))
+        worker_segment(incoming, segments, stop, get_settings=lambda: ProcessingSettings(target_language="cs"))
+        recognizer = SimpleNamespace(transcribe=lambda samples, partial, settings: RecognitionResult("hello", "en", "en"))
+        translator = SimpleNamespace(translate=lambda text, language, target: "ahoj")
         output = []
         worker_transcribe(segments, recognizer, texts, stop)
         worker_translate(texts, translator, SimpleNamespace(update=output.append), stop)
