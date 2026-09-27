@@ -53,6 +53,7 @@ Whisper models are downloaded on first run (~1.6 GB for turbo).
 | `--whisper` | Whisper model, `large-v3-turbo` by default. Smaller and faster: `small`, `medium` |
 | `--out-device` | Listen to a specific output device instead of the current one |
 | `--audio-file` | Read a PCM16 mono 16 kHz WAV instead of system audio; conflicts with `--out-device` |
+| `--metrics DIRECTORY` | Save timing events, resource samples and a comparison-ready summary |
 
 File input is paced at the recording's original speed, but does not play sound
 through your speakers. After EOF the last phrase is finalized and queued work
@@ -65,11 +66,42 @@ specific one, which then overrides detection) — and **Translate to**. Both tak
 effect for the next emitted draft or final. Results using previous settings
 are discarded. Drag the strip with the mouse, quit with `Esc` or `✕`.
 
+## Benchmark comparison
+
+Use the same WAV, languages and model for both runs:
+
+```powershell
+python main.py --audio-file benchmark.wav --src en --tgt ru --metrics runs/before
+# After changing the implementation:
+python main.py --audio-file benchmark.wav --src en --tgt ru --metrics runs/after
+python compare_metrics.py runs/before runs/after
+```
+
+Wait for `Finished — all phrases processed` and the `[metrics] saved` console
+message before closing the window. `summary.json` is saved after the UI has
+handled all queued subtitle updates. `events.jsonl` contains detailed timings
+and final original/translated text. Early close or failure is marked as an
+incomplete run. Existing `events.jsonl` files are never overwritten; use names
+such as `runs/before-02` for repetitions.
+
+The report separates model loading from processing, records complete Whisper
+calls (including generator consumption), translation requests and actual NLLB
+inference calls, job queue waiting times, draft/final display lag and first
+subtitle delay. Process CPU, Windows RAM and queue sizes are sampled every
+0.5 seconds. CPU uses one core as 100%. GPU utilization, VRAM and power are not
+collected. Display timing means Tk label update, not physical screen refresh.
+
+There is no automatic warmup: first inference is included and recorded as
+such. Repeat each configuration three times under similar background load.
+Comparison warns about differing file hashes, model/settings/runtime metadata
+or incomplete runs. Review saved final texts as well: `finals_not_displayed`
+can include empty recognition and invalidated settings, not just lost work.
+
 ## Tests
 
 ```
 python test_segmenter.py
-python -m unittest test_audio_sources test_app
+python -m unittest test_audio_sources test_app test_metrics
 ```
 
 Uses the runtime dependencies, without loading model weights or opening audio

@@ -74,3 +74,8 @@ class RecognitionResult:
 class ApplicationStatus:
     message: str
     is_error: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessingFinished:
+    """UI barrier: all earlier subtitle updates have been handled."""

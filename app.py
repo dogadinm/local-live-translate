@@ -2,6 +2,7 @@
 import queue
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Callable
 
@@ -17,7 +18,8 @@ class ApplicationController:
     def __init__(self, source: AudioSource, overlay,
                  recognizer_factory: Callable[[], Recognizer],
                  translator_factory: Callable[[], TextTranslator],
-                 settings: ProcessingSettings = ProcessingSettings()):
+                 settings: ProcessingSettings = ProcessingSettings(), metrics=None):
+        self.metrics = metrics
         self.source = source
         self.overlay = overlay
         self._recognizer_factory = recognizer_factory
@@ -33,6 +35,7 @@ class ApplicationController:
         overlay.on_target_change = self.set_target_language
         overlay.on_close = self.stop
         overlay.is_current = self.is_current
+        overlay.metrics = metrics
 
     def get_settings(self) -> ProcessingSettings:
         with self._settings_lock:
@@ -49,6 +52,8 @@ class ApplicationController:
             if self._stop.is_set() or all(getattr(self._settings, key) == value for key, value in changes.items()):
                 return
             self._settings = replace(self._settings, **changes, version=self._settings.version + 1)
+            if self.metrics:
+                self.metrics.count("settings_changes")
             self.overlay.clear_results()
 
     def set_source_language(self, iso: str | None) -> None:
@@ -71,6 +76,9 @@ class ApplicationController:
             message = f"{stage}: {exc}"
             print(f"[error] {message}")
             self._status(message, True)
+            if self.metrics:
+                self.metrics.record("error", stage=stage, message=str(exc))
+                self.metrics.finish("error")
             self.overlay.clear_results()
             self.source.stop()
 
@@ -96,11 +104,13 @@ class ApplicationController:
 
     def _load_and_start(self):
         self._status("Loading speech recognition…")
-        recognizer = self._recognizer_factory()
+        with self.metrics.measure("load_recognition") if self.metrics else nullcontext():
+            recognizer = self._recognizer_factory()
         if self._stop.is_set():
             return
         self._status("Loading translation…")
-        translator = self._translator_factory()
+        with self.metrics.measure("load_translation") if self.metrics else nullcontext():
+            translator = self._translator_factory()
         if self._stop.is_set():
             return
         segments, transcripts = queue.Queue(), queue.Queue()
@@ -108,13 +118,16 @@ class ApplicationController:
             if self._stop.is_set():
                 return
             self._status("Waiting for audio…")
+            if self.metrics:
+                self.metrics.processing_start({"audio": self.source.queue, "recognition": segments,
+                                               "translation": transcripts})
             self._spawn("Segmentation", worker_segment, self.source.queue, segments, self._stop,
                         get_settings=self.get_settings, on_boundary=self._on_boundary,
-                        on_stream=self._on_stream)
+                        on_stream=self._on_stream, metrics=self.metrics)
             self._spawn("Recognition", worker_transcribe, segments, recognizer, transcripts, self._stop,
-                        is_current=self.is_current, on_transcript=self.on_transcript)
+                        is_current=self.is_current, on_transcript=self.on_transcript, metrics=self.metrics)
             self._spawn("Translation", worker_translate, transcripts, translator, self, self._stop,
-                        is_current=self.is_current, on_finished=self._on_finished)
+                        is_current=self.is_current, on_finished=self._on_finished, metrics=self.metrics)
             if not self._stop.is_set():
                 try:
                     self.source.start()
@@ -139,6 +152,8 @@ class ApplicationController:
     def _on_finished(self):
         if not self._stop.is_set():
             self._status("Finished — all phrases processed")
+            if self.metrics:
+                self.overlay.finish_metrics()
 
     def on_transcript(self, transcript: Transcript):
         if self.is_current(transcript.meta):
@@ -157,6 +172,8 @@ class ApplicationController:
         for thread in threads:
             if thread is not threading.current_thread():
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if self.metrics:
+            self.metrics.close()
 
     def run(self) -> None:
         try:

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import ctranslate2
+from contextlib import nullcontext
 from transformers import NllbTokenizer  # tokenizer only — no torch needed
 
 from device import best_device
@@ -17,7 +18,8 @@ class Translator:
     rather than stored, because it is a property of that audio, not of the app.
     """
 
-    def __init__(self, model_dir: Path = CACHE_DIR):
+    def __init__(self, model_dir: Path = CACHE_DIR, metrics=None):
+        self.metrics = metrics
         if not model_dir.exists():
             raise RuntimeError(
                 f"Model not found: {model_dir}\nRun first:  python convert_model.py"
@@ -48,11 +50,13 @@ class Translator:
         ids = self.tokenizer.encode(text, add_special_tokens=False)
         tokens = [src] + self.tokenizer.convert_ids_to_tokens(ids) + ["</s>"]
 
-        result = self.translator.translate_batch(
-            [tokens],
-            target_prefix=[[tgt]],
-            max_decoding_length=200,
-            beam_size=2,  # 2 = good speed/quality balance for real-time
-        )
+        metrics = getattr(self, "metrics", None)
+        with metrics.measure("nllb") if metrics else nullcontext():
+            result = self.translator.translate_batch(
+                [tokens],
+                target_prefix=[[tgt]],
+                max_decoding_length=200,
+                beam_size=2,  # 2 = good speed/quality balance for real-time
+            )
         out = self.tokenizer.convert_tokens_to_ids(result[0].hypotheses[0])
         return self.tokenizer.decode(out, skip_special_tokens=True).strip()

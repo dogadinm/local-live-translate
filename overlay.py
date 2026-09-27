@@ -4,7 +4,7 @@ from tkinter import ttk
 from typing import Callable
 
 from langs import display, picker_items
-from events import ApplicationStatus, Transcript, Translation
+from events import ApplicationStatus, ProcessingFinished, Transcript, Translation
 
 BG = "#000000"
 FG_SRC = "#9aa0a6"
@@ -16,6 +16,7 @@ AUTO = "Auto"
 
 class SubtitleOverlay:
     """Borderless always-on-top subtitle bar with source and target pickers."""
+    metrics = None
 
     def __init__(
         self,
@@ -24,7 +25,7 @@ class SubtitleOverlay:
         on_source_change: Callable[[str | None], None] | None = None,
         on_target_change: Callable[[str], None] | None = None,
     ):
-        self._queue: queue.Queue[Translation | Transcript | ApplicationStatus | None] = queue.Queue()
+        self._queue: queue.Queue[Translation | Transcript | ApplicationStatus | ProcessingFinished | None] = queue.Queue()
         self.is_current = lambda meta: True
         self.on_close: Callable[[], None] | None = None
         self._closed = False
@@ -128,6 +129,9 @@ class SubtitleOverlay:
     def set_status(self, status: ApplicationStatus):
         self._queue.put(status)
 
+    def finish_metrics(self):
+        self._queue.put(ProcessingFinished())
+
     def close(self):
         """Main-thread shutdown; model calls may still be finishing in the background."""
         if self._closed:
@@ -151,7 +155,11 @@ class SubtitleOverlay:
                 event = self._queue.get_nowait()
                 if isinstance(event, (Translation, Transcript)) and not self.is_current(event.meta):
                     continue
-                if event is None:
+                if isinstance(event, ProcessingFinished):
+                    if self.metrics:
+                        self.metrics.finish()
+                        print(f"[metrics] saved to {self.metrics.directory / 'summary.json'}")
+                elif event is None:
                     self.text_label.config(text="")
                     self.status.config(text="")
                 elif isinstance(event, ApplicationStatus):
@@ -160,6 +168,8 @@ class SubtitleOverlay:
                     self.text_label.config(
                         text=event.text, fg=FG_DST if event.meta.is_final else FG_SRC
                     )
+                    if self.metrics:
+                        self.metrics.displayed(event)
                 elif event.detected_language and self.source_picker.get() == AUTO:
                     self.status.config(text=f"detected: {display(event.detected_language)}")
         except queue.Empty:
