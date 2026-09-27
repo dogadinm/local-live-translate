@@ -1,6 +1,7 @@
 """Controller, settings races and failures without model weights or a screen."""
 import queue
 import threading
+import time
 import unittest
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
@@ -70,7 +71,8 @@ class ControllerTests(unittest.TestCase):
 
     def segment(self, app):
         settings = app.get_settings()
-        return SpeechSegment(PhraseMeta("stream", 1, 1, 0, 1, True, settings.version),
+        now = time.monotonic()
+        return SpeechSegment(PhraseMeta("stream", 1, 1, now - 1, now, True, settings.version),
                              16000, np.zeros(16000, dtype=np.float32), settings)
 
     def enqueue(self, event):
@@ -234,7 +236,7 @@ class ControllerTests(unittest.TestCase):
     def test_controller_runs_eof_pipeline_and_shuts_down(self):
         app, source, overlay = self.make_app()
         samples = (0.2 * np.sin(2 * np.pi * 180 * np.arange(16000) / 16000)).astype(np.float32)
-        source.queue.put(AudioChunk("stream", 0, 16000, samples))
+        source.queue.put(AudioChunk("stream", time.monotonic() - 1, 16000, samples))
         source.queue.put(AudioStreamEnded("stream", source_finished=True))
         app.start()
         self.assertTrue(overlay.finished.wait(2))
@@ -276,7 +278,7 @@ class ControllerTests(unittest.TestCase):
                 app.start()
                 self.assertTrue(source.started.wait(2))
                 samples = (0.2 * np.sin(2 * np.pi * 180 * np.arange(16000) / 16000)).astype(np.float32)
-                source.queue.put(AudioChunk("stream", 0, 16000, samples))
+                source.queue.put(AudioChunk("stream", time.monotonic() - 1, 16000, samples))
                 source.queue.put(AudioStreamEnded("stream", source_finished=True))
                 self.assertTrue(overlay.failed.wait(2))
                 app.stop()

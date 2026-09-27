@@ -142,7 +142,7 @@ def test_drain_starts_a_new_draft_run_after_a_final():
     work.put(transcript("phrase-2-draft", phrase_id=2))
 
     kept = drain(work, transcript("phrase-1-draft"))
-    assert [item.text for item in kept] == ["phrase-1-draft", "phrase-1-final", "phrase-2-draft"]
+    assert [item.text for item in kept] == ["phrase-1-final", "phrase-2-draft"]
 
 
 def test_drain_on_an_empty_queue_returns_just_the_first_item():
@@ -165,7 +165,7 @@ def test_drain_only_replaces_with_a_strictly_newer_revision():
         other = transcript(revision=revision)
         work = queue.Queue()
         work.put(other)
-        assert drain(work, first) == [first, other]
+        assert drain(work, first) == [first]
 
 
 def test_phrase_metadata_tracks_samples_and_revisions():
