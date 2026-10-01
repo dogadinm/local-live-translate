@@ -16,7 +16,7 @@ from config import ProcessingSettings
 from events import AudioChunk, AudioStreamEnded, PhraseMeta, RecognitionResult, Translation
 from main import parse_args
 from metrics import Metrics, distribution, process_rss_bytes
-from overlay import AUTO, SubtitleOverlay
+from ui.overlay import AUTO, SubtitleOverlay
 
 
 class MetricsTests(unittest.TestCase):

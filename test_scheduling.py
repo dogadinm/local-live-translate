@@ -12,7 +12,7 @@ import numpy as np
 from config import ProcessingSettings
 from events import AudioStreamEnded, PhraseMeta, RecognitionResult, SpeechSegment, Transcript, Translation
 from metrics import Metrics
-from overlay import SubtitleOverlay
+from ui.overlay import SubtitleOverlay
 from pipeline import drain, worker_transcribe, worker_translate
 from scheduling import PendingQueue, presentation_is_newer
 

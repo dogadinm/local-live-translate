@@ -31,7 +31,7 @@ def check_languages(args):
 
 def build(args, source: AudioSource, metrics=None):
     """Compose the UI and controller; model loading belongs to the controller."""
-    from overlay import SubtitleOverlay
+    from ui.overlay import SubtitleOverlay
 
     def load_recognizer():
         from transcriber import Transcriber

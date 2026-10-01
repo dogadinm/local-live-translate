@@ -269,7 +269,7 @@ def test_translation_uses_explicit_target_without_mutable_model_settings():
 
 
 def test_overlay_keeps_event_until_display_and_styles_drafts_and_finals():
-    from overlay import SubtitleOverlay, FG_DST, FG_SRC, AUTO
+    from ui.overlay import SubtitleOverlay, FG_DST, FG_SRC, AUTO
     from langs import display
 
     overlay = SubtitleOverlay.__new__(SubtitleOverlay)

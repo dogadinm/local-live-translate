@@ -12,7 +12,7 @@ from app import ApplicationController
 from config import ProcessingSettings
 from events import (ApplicationStatus, AudioChunk, AudioStreamEnded, PhraseMeta,
                     RecognitionResult, SpeechSegment, Transcript, Translation)
-from overlay import AUTO, SubtitleOverlay
+from ui.overlay import AUTO, SubtitleOverlay
 from pipeline import worker_segment, worker_transcribe, worker_translate
 
 
